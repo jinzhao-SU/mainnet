@@ -7,26 +7,27 @@ import torch.optim as optim
 
 from tqdm import tqdm
 from torch.optim import lr_scheduler
-from model import SixtyChannels
+from model import MainNet
 from dataloader import UAVDatasetTuple
 from utils import draw_roc_curve, calculate_precision_recall, visualize_sum_testing_result, visualize_lstm_testing_result
 
 
-os.environ["CUDA_VISIBLE_DEVICES"]="3"
+os.environ["CUDA_VISIBLE_DEVICES"]="2"
 
-def train(model, train_loader, device, optimizer, criterion, epoch, weight):
+def train(model, train_loader, device, optimizer, criterion, epoch):
     model.train()
     sum_running_loss = 0.0
-    loss_bce = 0.0
+    loss_mse = 0.0
     num_images = 0
 
     for batch_idx, data in enumerate(tqdm(train_loader)):
         optimizer.zero_grad()
 
-        image = data['image'].to(device)
+        image = data['image'].to(device).float()
+        init = data['init'].to(device).float()
         label = data['label'].to(device).float()
         #model prediction
-        prediction = model(image)
+        prediction = model(subx=image, mainx=init)
         #loss
         loss_mse = criterion(prediction, label.data)
 
@@ -44,32 +45,30 @@ def train(model, train_loader, device, optimizer, criterion, epoch, weight):
             print('\nTraining phase: epoch: {} batch:{} Loss: {:.4f}\n'.format(epoch, batch_idx, sum_epoch_loss))
 
 
-def val(model, test_loader, device, criterion, epoch, weight):
+def val(model, test_loader, device, criterion, epoch, batch_size):
     model.eval()
     sum_running_loss = 0.0
-    num_images = 0
-    loss = 0.0
 
     with torch.no_grad():
         for batch_idx, data in enumerate(tqdm(test_loader)):
-            image = data['image'].to(device)
+            image = data['image'].to(device).float()
+            init = data['init'].to(device).float()
             label = data['label'].to(device).float()
 
-            prediction = model(x_image=image)
+            prediction = model(subx=image, mainx=init)
             # loss
             loss_mse = criterion(prediction, label.data)
 
             # accumulate loss
             sum_running_loss += loss_mse.item() * image.size(0)
-            num_images += image.size(0)
 
             # visualize the sum testing result
-            visualize_sum_testing_result(prediction, label.data, batch_idx, epoch)
+            visualize_sum_testing_result(init, prediction, label.data, batch_idx, epoch, batch_size)
 
-            sum_test_loss = sum_running_loss / len(test_loader.dataset)
-            loss = sum_test_loss
-            print('\nTesting phase: epoch: {} Loss: {:.4f}\n'.format(epoch, sum_test_loss))
-            return loss
+    sum_running_loss = sum_running_loss / len(test_loader.dataset)
+
+    print('\nTesting phase: epoch: {} Loss: {:.4f}\n'.format(epoch, sum_running_loss))
+    return sum_running_loss
 
 
 def save_model(checkpoint_dir, model_checkpoint_name, model):
@@ -83,6 +82,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", help="data path", required=True, type=str)
+    parser.add_argument("--init_path", help="init path", required=True, type=str)
     parser.add_argument("--label_path", help="label path", required=True, type=str)
     parser.add_argument("--lr", help="learning rate", required=True, type=float)
     parser.add_argument("--momentum", help="momentum", required=True, type=float)
@@ -101,7 +101,7 @@ def main():
 
     device = torch.device("cuda")
 
-    all_dataset = UAVDatasetTuple(image_path=args.data_path, label_path=args.label_path)
+    all_dataset = UAVDatasetTuple(image_path=args.data_path, init_path=args.init_path, label_path=args.label_path)
     # positive_ratio, negative_ratio = all_dataset.get_class_count()
     # weight = torch.FloatTensor((positive_ratio, negative_ratio))
     train_size = int(args.split_ratio * len(all_dataset))
@@ -111,7 +111,7 @@ def main():
     print("Total image tuples for test: ", len(test_dataset))
 
     print("\nLet's use", torch.cuda.device_count(), "GPUs!\n")
-    model_ft = SixtyChannels()
+    model_ft = MainNet()
     model_ft = nn.DataParallel(model_ft)
 
     criterion  = nn.MSELoss(reduction='sum')
@@ -145,7 +145,7 @@ def main():
         print('-' * 80)
         exp_lr_scheduler.step()
         train(model_ft, train_loader, device, optimizer_ft, criterion, epoch)
-        loss = val(model_ft, test_loader, device, criterion, epoch)
+        loss = val(model_ft, test_loader, device, criterion, epoch, args.batch_size)
         if loss < best_loss:
             save_model(checkpoint_dir=args.checkpoint_dir,
                        model_checkpoint_name=args.model_checkpoint_name + '_' + str(loss),
